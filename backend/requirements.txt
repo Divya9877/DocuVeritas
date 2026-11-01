@@ -1,0 +1,14 @@
+
+Flask
+Flask-Cors
+gunicorn
+python-dotenv
+groq
+PyMuPDF
+python-docx
+reportlab
+transformers
+torch
+sentence-transformers
+scikit-learn
+numpy
