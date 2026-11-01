@@ -1,4 +1,6 @@
 
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useEffect, useState } from "react";
 import {
   FileText,
@@ -17,6 +19,9 @@ import {
   LayoutDashboard,
   History,
   ClipboardCheck,
+  Files,
+  FileCheck2,
+  Clock3 as ReviewClock,
   Menu,
   X,
 } from "lucide-react";
@@ -52,6 +57,9 @@ function mapFindings(findings, reviews = []) {
       similarity: item.similarity,
       context: item.context_analysis,
       nli: item.nli_analysis,
+      explanation: item.genai_explanation || null,
+      explanationLoading: false,
+      explanationError: "",
       reviewStatus: decision
         ? decisionLabel(decision)
         : "Pending review",
@@ -88,9 +96,20 @@ function Dashboard({ onLogout, userEmail }) {
 
   const [reviewMessage, setReviewMessage] = useState("");
   const [audits, setAudits] = useState([]);
+  const [workspaceStats, setWorkspaceStats] = useState({
+    documentsAnalyzed: 0,
+    findingsReviewed: 0,
+    unresolvedFindings: 0,
+  });
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [openingAuditId, setOpeningAuditId] = useState(null);
+  const [expandedEvidence, setExpandedEvidence] = useState({});
+  const [documentQuestion, setDocumentQuestion] = useState("");
+  const [documentAnswer, setDocumentAnswer] = useState("");
+  const [documentSources, setDocumentSources] = useState([]);
+  const [askingDocuments, setAskingDocuments] = useState(false);
+  const [documentQuestionError, setDocumentQuestionError] = useState("");
 
   // Restore the most recently opened audit and its saved human reviews
   // when the page is refreshed.
@@ -146,6 +165,44 @@ function Dashboard({ onLogout, userEmail }) {
       const data = await readJson(response);
       const auditList = Array.isArray(data) ? data : (data.audits || []);
       setAudits(auditList);
+
+      // Calculate workspace-wide statistics from saved audits and their review records.
+      const documentsAnalyzed = auditList.reduce(
+        (total, audit) => total + (audit.document_a ? 1 : 0) + (audit.document_b ? 1 : 0),
+        0
+      );
+
+      const auditStats = await Promise.all(
+        auditList.map(async (audit) => {
+          try {
+            const [detailResponse, reviewsResponse] = await Promise.all([
+              apiFetch(`${API}/api/audits/${audit.id}`),
+              apiFetch(`${API}/api/audits/${audit.id}/reviews`),
+            ]);
+            const [detail, reviewData] = await Promise.all([
+              readJson(detailResponse),
+              readJson(reviewsResponse),
+            ]);
+            const findingCount = Array.isArray(detail.findings) ? detail.findings.length : 0;
+            const reviewedCount = Array.isArray(reviewData.reviews) ? reviewData.reviews.length : 0;
+            return {
+              findingCount,
+              reviewedCount: Math.min(reviewedCount, findingCount),
+            };
+          } catch {
+            // Keep the dashboard usable if one historical audit cannot be loaded.
+            return { findingCount: 0, reviewedCount: 0 };
+          }
+        })
+      );
+
+      const findingsReviewed = auditStats.reduce((total, item) => total + item.reviewedCount, 0);
+      const totalFindings = auditStats.reduce((total, item) => total + item.findingCount, 0);
+      setWorkspaceStats({
+        documentsAnalyzed,
+        findingsReviewed,
+        unresolvedFindings: Math.max(0, totalFindings - findingsReviewed),
+      });
     } catch (err) {
       setHistoryError(`Could not load audit history: ${err.message}`);
     } finally {
@@ -399,6 +456,78 @@ function Dashboard({ onLogout, userEmail }) {
     );
   }
 
+  async function generateExplanation(result) {
+    setResults((current) => current.map((item) =>
+      item.findingIndex === result.findingIndex
+        ? { ...item, explanationLoading: true, explanationError: "" }
+        : item
+    ));
+
+    try {
+       console.log("Explanation claim A:", result.a.text);
+       console.log("Explanation claim B:", result.b.text);
+      const response = await apiFetch(`${API}/api/contradiction/explain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          claim_a: result.a.text,
+          claim_b: result.b.text,
+        }),
+      });
+      const data = await readJson(response);
+      setResults((current) => current.map((item) =>
+        item.findingIndex === result.findingIndex
+          ? { ...item, explanation: data.explanation, explanationError: "" }
+          : item
+      ));
+    } catch (err) {
+      setResults((current) => current.map((item) =>
+        item.findingIndex === result.findingIndex
+          ? { ...item, explanationError: err.message }
+          : item
+      ));
+    } finally {
+      setResults((current) => current.map((item) =>
+        item.findingIndex === result.findingIndex
+          ? { ...item, explanationLoading: false }
+          : item
+      ));
+    }
+  }
+
+  async function askAboutDocuments(event) {
+    event?.preventDefault();
+    if (!files[0] || !files[1]) {
+      setDocumentQuestionError("First open Document Audit and select both PDF/DOCX files.");
+      return;
+    }
+    if (!documentQuestion.trim()) {
+      setDocumentQuestionError("Enter a question about the uploaded documents.");
+      return;
+    }
+    setAskingDocuments(true);
+    setDocumentQuestionError("");
+    setDocumentAnswer("");
+    setDocumentSources([]);
+    try {
+      const form = new FormData();
+      form.append("document_a", files[0]);
+      form.append("document_b", files[1]);
+      form.append("question", documentQuestion.trim());
+      const response = await apiFetch(`${API}/api/documents/ask`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await readJson(response);
+      setDocumentAnswer(data.answer || "No answer was returned.");
+      setDocumentSources(data.sources || []);
+    } catch (err) {
+      setDocumentQuestionError(err.message || "Could not answer the question.");
+    } finally {
+      setAskingDocuments(false);
+    }
+  }
+
   function resetDashboard() {
     window.localStorage.removeItem("docuveritas.lastAuditId");
     setFiles([null, null]);
@@ -441,6 +570,7 @@ function Dashboard({ onLogout, userEmail }) {
           <button type="button" className={`top-nav-item ${activeView === "overview" ? "active" : ""}`} onClick={() => { setActiveView("overview"); setMenuOpen(false); }}><LayoutDashboard size={18} /><span>Overview</span></button>
           <button type="button" className={`top-nav-item ${activeView === "audit" ? "active" : ""}`} onClick={() => { setActiveView("audit"); setMenuOpen(false); }}><FileText size={18} /><span>Document Audit</span></button>
           <button type="button" className={`top-nav-item ${activeView === "contradictions" ? "active" : ""}`} onClick={() => { setActiveView("contradictions"); setMenuOpen(false); }}><GitCompareArrows size={18} /><span>Contradiction Analysis</span></button>
+          <button type="button" className={`top-nav-item ${activeView === "ask" ? "active" : ""}`} onClick={() => { setActiveView("ask"); setMenuOpen(false); }}><MessageSquare size={18} /><span>Ask Documents</span></button>
           <button type="button" className={`top-nav-item ${activeView === "history" ? "active" : ""}`} onClick={() => { setActiveView("history"); setMenuOpen(false); loadAuditHistory(); }}><History size={18} /><span>Audit History</span></button>
           <button type="button" className={`top-nav-item ${activeView === "review" ? "active" : ""}`} onClick={() => { setActiveView("review"); setMenuOpen(false); }}><ClipboardCheck size={18} /><span>Human Review</span></button>
           <button type="button" className={`top-nav-item ${activeView === "reports" ? "active" : ""}`} onClick={() => { setActiveView("reports"); setMenuOpen(false); loadAuditHistory(); }}><FileDown size={18} /><span>Reports</span></button>
@@ -454,9 +584,9 @@ function Dashboard({ onLogout, userEmail }) {
       <main className="main-content">
         <header className="topbar">
           <div>
-            <span className="breadcrumb">Workspace / {({ overview: "Overview", audit: "Document audit", contradictions: "Contradiction analysis", history: "Audit history", review: "Human review", reports: "Reports" })[activeView]}</span>
-            <h1>{({ overview: "Workspace overview", audit: "Document consistency audit", contradictions: "Contradiction analysis", history: "Audit history", review: "Human review", reports: "Audit reports" })[activeView]}</h1>
-            <p>{({ overview: "Review your document auditing activity at a glance.", audit: "Upload two documents and compare their claims.", contradictions: "Inspect semantic matches and potential conflicts.", history: "Reopen previous comparisons and review their results.", review: "Review AI predictions and record human decisions.", reports: "Download PDF reports from completed audits." })[activeView]}</p>
+            <span className="breadcrumb">Workspace / {({ overview: "Overview", audit: "Document audit", contradictions: "Contradiction analysis", ask: "Ask documents", history: "Audit history", review: "Human review", reports: "Reports" })[activeView]}</span>
+            <h1>{({ overview: "Workspace overview", audit: "Document consistency audit", contradictions: "Contradiction analysis", ask: "Ask your documents", history: "Audit history", review: "Human review", reports: "Audit reports" })[activeView]}</h1>
+            <p>{({ overview: "Review your document auditing activity at a glance.", audit: "Upload two documents and compare their claims.", contradictions: "Inspect semantic matches and potential conflicts.", ask: "Ask questions grounded in evidence retrieved from your uploaded documents.", history: "Reopen previous comparisons and review their results.", review: "Review AI predictions and record human decisions.", reports: "Download PDF reports from completed audits." })[activeView]}</p>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
@@ -495,6 +625,23 @@ function Dashboard({ onLogout, userEmail }) {
             <span>Contradiction predictions</span>
             <strong>{contradictions.length}</strong>
             <AlertTriangle size={20} />
+          </div>
+          <div className="metric-card">
+            <span>Documents analyzed</span>
+            <strong>{workspaceStats.documentsAnalyzed}</strong>
+            <Files size={20} />
+          </div>
+
+          <div className="metric-card">
+            <span>Findings reviewed</span>
+            <strong>{workspaceStats.findingsReviewed}</strong>
+            <FileCheck2 size={20} />
+          </div>
+
+          <div className="metric-card">
+            <span>Unresolved findings</span>
+            <strong>{workspaceStats.unresolvedFindings}</strong>
+            <ReviewClock size={20} />
           </div>
         </section>
 
@@ -738,6 +885,61 @@ function Dashboard({ onLogout, userEmail }) {
         </section>
 
         )}
+        {activeView === "ask" && (
+          <section className="panel">
+            <div className="panel-heading">
+              <div>
+                <h2>Ask your documents</h2>
+                <p>Ask a question across the two selected documents. Answers use retrieved passages and cite their sources.</p>
+              </div>
+              <MessageSquare size={22} />
+            </div>
+            <div className="info-banner" style={{ marginBottom: "14px" }}>
+              {files[0] && files[1]
+                ? <>Selected: <strong>{files[0].name}</strong> and <strong>{files[1].name}</strong></>
+                : <>No documents selected yet. Go to <strong>Document Audit</strong> and select both files first. Your selected files remain available when you switch tabs.</>}
+            </div>
+            <form onSubmit={askAboutDocuments}>
+              <label htmlFor="document-question"><strong>Your question</strong></label>
+              <textarea
+                id="document-question"
+                value={documentQuestion}
+                onChange={(event) => setDocumentQuestion(event.target.value)}
+                placeholder="e.g. What do the documents say about password rotation requirements?"
+                rows={3}
+                maxLength={1000}
+                style={{ width: "100%", marginTop: "8px", padding: "12px", borderRadius: "10px", border: "1px solid var(--border-color, #d1d5db)", font: "inherit", resize: "vertical" }}
+              />
+              <div className="action-row">
+                <button className="primary-button" type="submit" disabled={askingDocuments}>
+                  {askingDocuments ? <LoaderCircle className="spin" size={18} /> : <Search size={18} />}
+                  {askingDocuments ? "Searching evidence..." : "Ask with GenAI"}
+                </button>
+              </div>
+            </form>
+            {documentQuestionError && <div className="error-message" style={{ marginTop: "12px" }}>{documentQuestionError}</div>}
+            {documentAnswer && (
+              <section style={{ marginTop: "18px", padding: "16px", border: "1px solid var(--border-color, #e5e7eb)", borderRadius: "12px" }}>
+                <h3 style={{ marginTop: 0 }}>Answer</h3>
+                <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.65 }}>{documentAnswer}</p>
+                <p style={{ color: "var(--muted-text, #64748b)", fontSize: "0.9rem" }}>AI-generated answer. Verify the cited passages in the original documents.</p>
+                <h3>Retrieved source evidence</h3>
+                <div className="findings-list">
+                  {documentSources.map((source) => (
+                    <article className="finding-card" key={source.id}>
+                      <div className="finding-header">
+                        <strong>[Source {source.id}] {source.document}</strong>
+                        <span className="finding-number">{source.location}</span>
+                      </div>
+                      <p style={{ whiteSpace: "pre-wrap" }}>{source.text}</p>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+          </section>
+        )}
+
         {/* Analysis findings */}
         {(activeView === "contradictions" || activeView === "review") && (
         <section className="panel">
@@ -815,6 +1017,28 @@ function Dashboard({ onLogout, userEmail }) {
                     </div>
                   </div>
 
+                  <div style={{ marginTop: "10px" }}>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setExpandedEvidence((current) => ({ ...current, [result.findingIndex]: !current[result.findingIndex] }))}
+                      aria-expanded={Boolean(expandedEvidence[result.findingIndex])}
+                    >
+                      <Search size={16} />
+                      {expandedEvidence[result.findingIndex] ? "Hide source evidence" : "Show source evidence"}
+                    </button>
+                  </div>
+                  {expandedEvidence[result.findingIndex] && (
+                    <section style={{ marginTop: "12px", padding: "14px", border: "1px solid var(--border-color, #e5e7eb)", borderRadius: "10px", background: "var(--surface-muted, #f8fafc)" }}>
+                      <strong>Source evidence for Pair {result.id}</strong>
+                      <p style={{ marginBottom: "6px" }}><strong>{result.a.source_document || "Document A"}</strong> · {result.a.source_location || "Location unavailable"}</p>
+                      <p style={{ marginTop: 0 }}><mark style={{ padding: "2px 4px", borderRadius: "3px" }}>{result.a.text}</mark></p>
+                      <p style={{ marginBottom: "6px" }}><strong>{result.b.source_document || "Document B"}</strong> · {result.b.source_location || "Location unavailable"}</p>
+                      <p style={{ marginTop: 0 }}><mark style={{ padding: "2px 4px", borderRadius: "3px" }}>{result.b.text}</mark></p>
+                      <small>Highlighted text shows the extracted claims used in this comparison. Check the source document for surrounding context.</small>
+                    </section>
+                  )}
+
                   <div className="finding-details">
                     <p>
                       <strong>Semantic similarity:</strong>{" "}
@@ -844,6 +1068,52 @@ function Dashboard({ onLogout, userEmail }) {
                       </div>
                     )}
                   </div>
+
+                  <section
+                    className="genai-explanation-panel"
+                    style={{
+                      marginTop: "14px",
+                      padding: "14px",
+                      border: "1px solid var(--border-color, #e5e7eb)",
+                      borderRadius: "10px",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                      <MessageSquare size={18} />
+                      <strong>GenAI explanation</strong>
+                    </div>
+                    <p style={{ margin: "8px 0", color: "var(--muted-text, #6b7280)" }}>
+                      Generate a plain-language explanation of how these claims differ.
+                      The result is AI-generated and should be checked against the source documents.
+                    </p>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => generateExplanation(result)}
+                      disabled={result.explanationLoading}
+                    >
+                      {result.explanationLoading ? (
+                        <LoaderCircle className="spin" size={16} />
+                      ) : (
+                        <MessageSquare size={16} />
+                      )}
+                      {result.explanationLoading ? "Generating explanation..." : result.explanation ? "Regenerate explanation" : "Explain with GenAI"}
+                    </button>
+                    {result.explanationError && (
+                      <p className="error-message" role="alert" style={{ marginTop: "10px" }}>
+                        {result.explanationError}
+                      </p>
+                    )}{result.explanation && (
+  <div
+    className="genai-markdown"
+    style={{ marginTop: "12px", lineHeight: 1.7 }}
+  >
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      {result.explanation}
+    </ReactMarkdown>
+  </div>
+)}
+                  </section>
 
                   <div className="human-review-panel" style={{
                     marginTop: "16px",

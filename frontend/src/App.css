@@ -705,3 +705,42 @@ footer { padding: 18px 0 10px; color: #8a94b2; font-size: 11px; text-align: cent
   .welcome-actions { gap: 8px; }
   .welcome-actions .primary-button, .hero-secondary { min-height: 43px; padding-inline: 12px; font-size: 12px; }
 }
+
+.genai-markdown {
+  color: var(--text-color, #24304a);
+  overflow-wrap: anywhere;
+}
+
+.genai-markdown h1,
+.genai-markdown h2,
+.genai-markdown h3 {
+  margin: 16px 0 8px;
+  color: #252b63;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.genai-markdown p {
+  margin: 8px 0 12px;
+}
+
+.genai-markdown ul,
+.genai-markdown ol {
+  padding-left: 24px;
+  margin: 8px 0 14px;
+}
+
+.genai-markdown li {
+  margin-bottom: 6px;
+}
+
+.genai-markdown strong {
+  font-weight: 700;
+  color: #252b63;
+}
+
+.genai-markdown code {
+  background: rgba(100, 116, 139, 0.12);
+  padding: 2px 5px;
+  border-radius: 4px;
+}

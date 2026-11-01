@@ -1,0 +1,17 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Frontend dependencies
+node_modules/
+
+# Local database
+backend/docuveritas.db
